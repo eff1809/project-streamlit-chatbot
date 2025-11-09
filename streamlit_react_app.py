@@ -1,132 +1,259 @@
-# Import the necessary libraries
-import streamlit as st  # For creating the web app interface
-from langchain_google_genai import ChatGoogleGenerativeAI  # For interacting with Google Gemini via LangChain
-from langgraph.prebuilt import create_react_agent  # For creating a ReAct agent
-from langchain_core.messages import HumanMessage, AIMessage  # For message formatting
+# Import Libraries
+import streamlit as st
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-# --- 1. Page Configuration and Title ---
 
-# Set the title and a caption for the web page
-st.title("💬 LangGraph ReAct Chatbot")
-st.caption("A simple and friendly chat using LangGraph with Google's Gemini model")
+# ---------------- CUSTOM PAGE DESIGN ---------------- #
+st.set_page_config(page_title="UMKM Business Helper Bot", layout="wide")
 
-# --- 2. Sidebar for Settings ---
+st.markdown("""
+<style>
+    body {
+        background-color: #eef0f3;
+    }
+    .main {
+        background-color: #ffffff;
+        padding: 20px;
+        border-radius: 10px;
+    }
+    .stTextInput>div>div>input {
+        border-radius: 6px;
+        padding: 8px;
+    }
+    .stChatMessage {
+        font-size: 15px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# Create a sidebar section for app settings using 'with st.sidebar:'
+
+# ---------------- TITLE ---------------- #
+st.title("UMKM Business Helper Bot")
+st.write("Asisten pemasaran digital untuk membantu UMKM membuat konten pemasaran yang efektif.")
+
+
+# ---------------- SIDEBAR SETTINGS ---------------- #
 with st.sidebar:
-    # Add a subheader to organize the settings
-    st.subheader("Settings")
-    
-    # Create a text input field for the Google AI API Key.
-    # 'type="password"' hides the key as the user types it.
+    st.header("Settings")
+
     google_api_key = st.text_input("Google AI API Key", type="password")
-    
-    # Create a button to reset the conversation.
-    # 'help' provides a tooltip that appears when hovering over the button.
-    reset_button = st.button("Reset Conversation", help="Clear all messages and start fresh")
 
-# --- 3. API Key and Agent Initialization ---
+    st.markdown("---")
+    st.subheader("Preferensi Marketing")
+    default_style = st.selectbox("Gaya Bahasa", ["Ramah & Persuasif", "Formal", "Santai / Gaul"], index=0)
+    default_platform = st.selectbox("Platform Promosi", ["Instagram", "TikTok", "Marketplace"], index=0)
 
-# Check if the user has provided an API key.
-# If not, display an informational message and stop the app from running further.
+    reset_button = st.button("Reset", help="Reset percakapan dan memory produk")
+
+
 if not google_api_key:
-    st.info("Please add your Google AI API key in the sidebar to start chatting.", icon="🗝️")
+    st.info("Masukkan Google API key untuk mulai chatting.")
     st.stop()
 
-# This block of code handles the creation of the LangGraph agent.
-# It's designed to be efficient: it only creates a new agent if one doesn't exist
-# or if the user has changed the API key in the sidebar.
 
-# We use `st.session_state` which is Streamlit's way of "remembering" variables
-# between user interactions (like sending a message or clicking a button).
+# ---------------- FORM INPUT PRODUCT MEMORY ---------------- #
+st.subheader("Detail Produk UMKM")
+
+with st.form("product_info_form"):
+    product_name = st.text_input("Nama Produk", st.session_state.get("product_name", ""))
+    product_category = st.text_input("Kategori Produk", st.session_state.get("product_category", ""))
+    product_target = st.text_input("Target Audience", st.session_state.get("product_target", ""))
+    product_price = st.text_input("Kisaran Harga (opsional)", st.session_state.get("product_price", ""))
+
+    save_product_info = st.form_submit_button("Simpan Informasi Produk")
+
+if save_product_info:
+    st.session_state.product_name = product_name
+    st.session_state.product_category = product_category
+    st.session_state.product_target = product_target
+    st.session_state.product_price = product_price
+    st.success("Informasi produk berhasil disimpan.")
+
+
+# ---------------- TOOL FUNCTIONS (callables with name attr) ---------------- #
+def price_estimator_tool(category: str) -> str:
+    """Return an estimated price range for a product category."""
+    # normalize category to simple key
+    if not category:
+        return "Kategori tidak disebutkan. Mohon sebutkan kategori produk (mis: Makanan, Fashion, Kerajinan)."
+    key = category.strip().title()
+    price_map = {
+        "Makanan": "Rp10.000 - Rp40.000",
+        "Minuman": "Rp8.000 - Rp30.000",
+        "Fashion": "Rp50.000 - Rp200.000",
+        "Kerajinan": "Rp30.000 - Rp150.000",
+        "Jasa": "Rp50.000 - Rp250.000",
+        "Lainnya": "Harga bervariasi tergantung pasar lokal"
+    }
+    return price_map.get(key, "Harga belum tersedia untuk kategori tersebut.")
+
+# attach metadata attributes the agent/adapter may check
+price_estimator_tool.name = "PriceEstimator"
+price_estimator_tool.description = "Memperkirakan rentang harga berdasarkan kategori produk UMKM."
+
+
+def hashtag_generator_tool(category: str) -> str:
+    """Return suggested hashtags for a given category."""
+    if not category:
+        return "#umkm #jualanonline"
+    key = category.strip().title()
+    tag_map = {
+        "Makanan": "#kuliner #jajanmurah #makananlezat #cemilan",
+        "Fashion": "#ootd #fashionlokal #brandlokal #gayalokal",
+        "Kerajinan": "#produkhandmade #umkmlokal #karyaanakbangsa",
+        "Jasa": "#layananprofesional #jasaindonesia #bisnisjasa",
+        "Lainnya": "#umkm #jualanonline #bisnisrumahan"
+    }
+    return tag_map.get(key, "#umkmindonesia")
+
+hashtag_generator_tool.name = "HashtagGenerator"
+hashtag_generator_tool.description = "Membuat saran hashtag berdasarkan kategori produk."
+
+
+# ---------------- HELPER PROMPT ---------------- #
+def build_umkm_user_prompt(user_question: str, style: str, platform: str):
+    template = f"""
+    Kamu adalah UMKM Business Helper Bot.
+
+    Tugas kamu:
+    - Membuat deskripsi produk singkat dan menarik
+    - Memberikan ide caption promosi untuk platform {platform}
+    - Memberikan strategi pemasaran sederhana
+    - Memberikan saran rentang harga jika relevan
+
+    Format jawaban:
+
+    1. Deskripsi Produk
+       - 2-3 kalimat promosi
+
+    2. Caption Promosi ({platform})
+       - Caption 1
+       - Caption 2
+       - Caption 3
+
+    3. Strategi Promosi Singkat
+       - Strategi 1
+       - Strategi 2
+       - Strategi 3
+
+    4. Saran Harga (opsional)
+       - Range harga wajar sesuai kategori produk
+
+    Gunakan gaya bahasa: {style}
+
+    Permintaan pengguna:
+    "{user_question}"
+    """
+    return template
+
+
+# ---------------- INIT AGENT ---------------- #
 if ("agent" not in st.session_state) or (getattr(st.session_state, "_last_key", None) != google_api_key):
     try:
-        # Initialize the LLM with the API key
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             google_api_key=google_api_key,
-            temperature=0.7
+            temperature=0.85,
+            top_p=0.9
         )
-        
-        # Create a simple ReAct agent with the LLM
+
+        system_prompt = """
+        You are UMKM Business Helper Bot, an AI assistant for Indonesian SMEs.
+        Always respond in Indonesian. If needed, ask for clarifying details.
+        Provide structured and helpful marketing suggestions.
+        """
+
+        # pass the callable functions as tools (they have .name and .description attributes)
+        tools = [price_estimator_tool, hashtag_generator_tool]
+
         st.session_state.agent = create_react_agent(
             model=llm,
-            tools=[],  # No tools for this simple example
-            prompt="You are a helpful, friendly assistant. Respond concisely and clearly."
+            tools=tools,
+            prompt=system_prompt
         )
-        
-        # Store the new key in session state to compare against later.
+
         st.session_state._last_key = google_api_key
-        # Since the key changed, we must clear the old message history.
         st.session_state.pop("messages", None)
+
     except Exception as e:
-        # If the key is invalid, show an error and stop.
-        st.error(f"Invalid API Key or configuration error: {e}")
+        st.error(f"API Error: {e}")
         st.stop()
 
-# --- 4. Chat History Management ---
 
-# Initialize the message history (as a list) if it doesn't exist.
+# ---------------- CHAT HISTORY ---------------- #
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Handle the reset button click.
 if reset_button:
-    # If the reset button is clicked, clear the agent and message history from memory.
-    st.session_state.pop("agent", None)
-    st.session_state.pop("messages", None)
-    # st.rerun() tells Streamlit to refresh the page from the top.
+    # clear only keys we used
+    for k in ["messages", "agent", "product_name", "product_category", "product_target", "product_price", "_last_key"]:
+        if k in st.session_state:
+            st.session_state.pop(k, None)
     st.rerun()
 
-# --- 5. Display Past Messages ---
 
-# Loop through every message currently stored in the session state.
+# ---------------- DISPLAY CHAT HISTORY ---------------- #
 for msg in st.session_state.messages:
-    # For each message, create a chat message bubble with the appropriate role ("user" or "assistant").
     with st.chat_message(msg["role"]):
-        # Display the content of the message using Markdown for nice formatting.
         st.markdown(msg["content"])
 
-# --- 6. Handle User Input and Agent Communication ---
 
-# Create a chat input box at the bottom of the page.
-# The user's typed message will be stored in the 'prompt' variable.
-prompt = st.chat_input("Type your message here...")
+# ---------------- USER INPUT ---------------- #
+prompt = st.chat_input("Masukkan kebutuhan pemasaran produk Anda...")
 
-# Check if the user has entered a message.
+
 if prompt:
-    # 1. Add the user's message to our message history list.
     st.session_state.messages.append({"role": "user", "content": prompt})
-    # 2. Display the user's message on the screen immediately for a responsive feel.
+
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 3. Get the assistant's response.
-    # Use a 'try...except' block to gracefully handle potential errors (e.g., network issues, API errors).
     try:
-        # Convert the message history to the format expected by the agent
+        formatted_prompt = build_umkm_user_prompt(prompt, default_style, default_platform)
+
         messages = []
+
+        # Inject Product Memory as System Instruction
+        product_memory = ""
+        if "product_name" in st.session_state:
+            product_memory += f"Nama Produk: {st.session_state.product_name}\n"
+        if "product_category" in st.session_state:
+            product_memory += f"Kategori: {st.session_state.product_category}\n"
+        if "product_target" in st.session_state:
+            product_memory += f"Target Audience: {st.session_state.product_target}\n"
+        if "product_price" in st.session_state:
+            product_memory += f"Harga Ideal: {st.session_state.product_price}\n"
+
+        if product_memory:
+            messages.append(SystemMessage(content="Informasi Produk:\n" + product_memory))
+
         for msg in st.session_state.messages:
             if msg["role"] == "user":
                 messages.append(HumanMessage(content=msg["content"]))
             elif msg["role"] == "assistant":
                 messages.append(AIMessage(content=msg["content"]))
-        
-        # Send the user's prompt to the agent
+
+        messages.append(HumanMessage(content=formatted_prompt))
+
+        # Invoke agent
         response = st.session_state.agent.invoke({"messages": messages})
-        
-        # Extract the answer from the response
-        if "messages" in response and len(response["messages"]) > 0:
+
+        # extract assistant text robustly (langgraph responses can vary)
+        answer = ""
+        if isinstance(response, dict) and "messages" in response and len(response["messages"]) > 0:
             answer = response["messages"][-1].content
+        elif hasattr(response, "content"):
+            # fallback if agent returns a single message object
+            answer = response.content
         else:
-            answer = "I'm sorry, I couldn't generate a response."
+            answer = str(response)
 
     except Exception as e:
-        # If any error occurs, create an error message to display to the user.
-        answer = f"An error occurred: {e}"
+        answer = f"Error: {e}"
 
-    # 4. Display the assistant's response.
     with st.chat_message("assistant"):
         st.markdown(answer)
-    # 5. Add the assistant's response to the message history list.
+
     st.session_state.messages.append({"role": "assistant", "content": answer})
